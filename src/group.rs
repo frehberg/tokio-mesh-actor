@@ -1,19 +1,20 @@
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+use crate::Gate;
 use crate::actor::{Actor, Handler, Message};
-use crate::{Gate};
 use crate::runner::ActorRunner;
 use crate::system::{ActorSystem, SystemEvent};
 
-pub struct ActorGroup <E: SystemEvent>{
+pub struct ActorGroup<E: SystemEvent> {
     cancel_token: CancellationToken,
     system: ActorSystem<E>,
 }
 
 impl<E: SystemEvent> ActorGroup<E>
 {
-    pub fn new(cancel_token : CancellationToken, system: ActorSystem<E>) -> ActorGroup<E> {
-        ActorGroup{cancel_token, system}
+    pub fn new(cancel_token: CancellationToken, system: ActorSystem<E>) -> ActorGroup<E> {
+        ActorGroup { cancel_token, system }
     }
 
     pub fn terminate(&self) {

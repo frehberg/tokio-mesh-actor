@@ -2,10 +2,13 @@ use anyhow;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::UnboundedSender;
 pub use tokio_util::sync::CancellationToken;
 
-use crate::actor::Message;
+use crate::actor::{Actor, Message};
+use crate::handler::BoxedMessageHandler;
 use crate::system::{ActorSystem, SystemEvent};
+use crate::timer::Timer;
 
 pub mod actor;
 pub mod handler;
@@ -13,6 +16,7 @@ pub mod system;
 pub mod bus;
 pub mod runner;
 pub mod group;
+pub mod timer;
 
 
 #[derive(Debug, Eq, PartialEq)]
@@ -31,7 +35,7 @@ pub enum ActorTrySendError<T> {
 
 #[derive(Error, Debug)]
 pub enum ActorError {
-    #[error("Actor creation failed")]
+    #[error("Actor queues congested")]
     Congestion,
 
     #[error("Actor creation failed")]
@@ -56,14 +60,31 @@ impl ActorError {
 
 /// The actor context gives a running actor access to its path, as well as the system that
 /// is running it.
-pub struct ActorContext<E: SystemEvent> {
-    pub system: ActorSystem<E>,
+pub struct ActorContext<E: SystemEvent, A: Actor<E> + ?Sized> {
+    system: ActorSystem<E>,
+    timer_tx: UnboundedSender<BoxedMessageHandler<E, A>>,
 }
 
-// TODO: try to get rid of Box
+
+impl<E: SystemEvent, A: Actor<E>> ActorContext<E, A> {
+    pub fn new(system: ActorSystem<E>, timer_tx: UnboundedSender<BoxedMessageHandler<E, A>>) -> ActorContext<E, A> {
+        ActorContext { system: system, timer_tx: timer_tx }
+    }
+
+    pub fn system<'t>(&'t self) -> &'t ActorSystem<E> {
+        &self.system
+    }
+
+    pub fn timer(&self) -> Timer<E, A> {
+        Timer::new(self.timer_tx.clone())
+    }
+}
+
+
 pub type Sender<M> = mpsc::Sender<Box<handler::ActorMessage<M>>>;
 pub type Receiver<M> = mpsc::Receiver<Box<handler::ActorMessage<M>>>;
 
+#[derive(Error, Debug, Clone)]
 pub struct Gate<M: Message> (Sender<M>);
 
 impl<M: Message> Gate<M> {
@@ -117,35 +138,66 @@ mod tests {
     impl SystemEvent for TestSystemEvent {}
 
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct TestActor1 {
-        pub num: usize,
+        pub pre_count: usize,
+        pub event_count: usize,
+        pub msg_count: usize,
+        pub post_count: usize,
+
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct TestActor2 {
-        pub num: usize,
+        pub pre_count: usize,
+        pub event_count: usize,
+        pub msg_count: usize,
+        pub post_count: usize,
     }
 
 
     #[async_trait]
     impl Actor<TestSystemEvent> for TestActor1 {
-        async fn event(&mut self, _event: &TestSystemEvent, _ctx: &mut ActorContext<TestSystemEvent>) -> Result<(), ActorError> {
-            self.num += 1;
+        async fn event(&mut self, _event: &TestSystemEvent, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> Result<(), ActorError> {
+            self.event_count += 1;
             Ok(())
+        }
+
+
+        /// Override this function if you like to perform initialization of the actor
+        async fn pre_start(&mut self, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> Result<(), ActorError> {
+            self.pre_count += 1;
+            Ok(())
+        }
+
+        /// Override this function if you like to perform work when the actor is stopped
+        async fn post_stop(&mut self, _ctx: &mut ActorContext<TestSystemEvent, Self>) {
+            self.post_count += 1;
         }
     }
 
     #[async_trait]
     impl Actor<TestSystemEvent> for TestActor2 {
-        async fn event(&mut self, _event: &TestSystemEvent, _ctx: &mut ActorContext<TestSystemEvent>) -> Result<(), ActorError> {
-            self.num += 1;
+        async fn event(&mut self, _event: &TestSystemEvent, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> Result<(), ActorError> {
+            self.event_count += 1;
             Ok(())
+        }
+
+
+        /// Override this function if you like to perform initialization of the actor
+        async fn pre_start(&mut self, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> Result<(), ActorError> {
+            self.pre_count += 1;
+            Ok(())
+        }
+
+        /// Override this function if you like to perform work when the actor is stopped
+        async fn post_stop(&mut self, _ctx: &mut ActorContext<TestSystemEvent, Self>) {
+            self.post_count += 1;
         }
     }
 
     #[derive(Clone, Debug)]
-    struct TestMessage (pub String);
+    struct TestMessage(pub String);
 
     #[derive(Clone, Debug)]
     enum TestResponse { Ok, Fail }
@@ -157,14 +209,16 @@ mod tests {
 
     #[async_trait]
     impl Handler<TestSystemEvent, TestMessage> for TestActor1 {
-        async fn handle(&mut self, _msg: TestMessage, _ctx: &mut ActorContext<TestSystemEvent>) -> TestResponse {
-            TestResponse::Fail
+        async fn handle(&mut self, _msg: TestMessage, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> TestResponse {
+            self.msg_count += 1;
+            TestResponse::Ok
         }
     }
 
     #[async_trait]
     impl Handler<TestSystemEvent, TestMessage> for TestActor2 {
-        async fn handle(&mut self, _msg: TestMessage, _ctx: &mut ActorContext<TestSystemEvent>) -> TestResponse {
+        async fn handle(&mut self, _msg: TestMessage, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> TestResponse {
+            self.msg_count += 1;
             TestResponse::Fail
         }
     }
@@ -173,23 +227,55 @@ mod tests {
     async fn create_system_and_join() {
         let bus = EventBus::new(200);
         let system: ActorSystem<TestSystemEvent> = ActorSystem::new(bus);
+
+        let actor1 = TestActor1 { pre_count: 0, event_count: 0, msg_count: 0, post_count: 0 };
+        let group = system.create_group();
+        let (join_handle1, _gate1) = group.single_gated_actor(actor1, 200);
+
+        // trigger event
         system.publish(TestSystemEvent::None);
 
-        let actor1 = TestActor1 { num: 0 };
-        let actor2 = TestActor2 { num: 0 };
-        let group = system.create_group();
-        let (join_handle1, gate1) = group.single_gated_actor(actor1, 200);
-        let (join_handle2, gate2) = group.single_gated_actor(actor2, 200);
         // gates of same type may be managed in containers
-        for gate in vec![gate1, gate2].iter() {
-            gate.tell(TestMessage("Hallo".to_string())).await;
-        }
         group.terminate();
 
         // wait for terminated actor1 and actor2
         let terminated = join_handle1.await;
         assert!(terminated.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_system_handle_message() {
+        let bus = EventBus::new(200);
+        let system: ActorSystem<TestSystemEvent> = ActorSystem::new(bus);
+
+        let actor1 = TestActor1 { pre_count: 0, event_count: 0, msg_count: 0, post_count: 0 };
+        let actor2 = TestActor2 { pre_count: 0, event_count: 0, msg_count: 0, post_count: 0 };
+        let group = system.create_group();
+        let (join_handle1, gate1) = group.single_gated_actor(actor1, 200);
+        let (join_handle2, gate2) = group.single_gated_actor(actor2, 200);
+
+        system.publish(TestSystemEvent::None);
+
+        // gates of same type may be managed in containers
+        for gate in vec![gate1.clone(), gate2.clone()].iter() {
+            let _ = gate.tell(TestMessage("Nachricht 1".to_string())).await;
+        }
+
+        for gate in vec![gate1.clone(), gate2.clone()].iter() {
+            let _ = gate.tell(TestMessage("Nachricht 2".to_string())).await;
+        }
+
+        system.publish(TestSystemEvent::None);
+
+        group.terminate();
+
+        // wait for terminated actor1 and actor2
+        let terminated = join_handle1.await;
+        assert!(terminated.is_ok());
+        assert_eq!(terminated.unwrap(), TestActor1 { pre_count: 1, event_count: 2, msg_count: 2, post_count: 1 });
+
         let terminated = join_handle2.await;
         assert!(terminated.is_ok());
+        assert_eq!(terminated.unwrap(), TestActor2 { pre_count: 1, event_count: 2, msg_count: 2, post_count: 1 });
     }
 }

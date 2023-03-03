@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender};
 pub use tokio::sync::broadcast::error::RecvError as EventRecvError;
 pub use tokio::sync::broadcast::error::SendError;
-use tokio::sync::broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender};
 
 pub type EventReceiver<T> = BroadcastReceiver<T>;
 pub(crate) type EventSender<T> = BroadcastSender<T>;

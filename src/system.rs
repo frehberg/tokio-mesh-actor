@@ -40,7 +40,6 @@ impl<E: SystemEvent> ActorSystem<E> {
 
         ActorGroup::new(cancel_token, system)
     }
-
 }
 
 
@@ -58,7 +57,8 @@ mod tests {
     #[tokio::test]
     async fn create_system() {
         let bus = EventBus::new(200);
-        let system: ActorSystem<TestSystemEvent> = ActorSystem::new(bus);
+        let system: ActorSystem<TestSystemEvent>
+            = ActorSystem::new(bus);
         let events = system.events();
         system.publish(TestSystemEvent::None);
         assert_eq!(1, events.len());

@@ -12,6 +12,7 @@ log = "0.4"
 thiserror = "1.0"
 anyhow = "1.0"
 tokio-util = { version = "0.7", features = ["full"] }
+derivative = "2.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
