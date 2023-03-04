@@ -1,7 +1,23 @@
 # Tokio Mesh Actor Framework
 
-Status: This is Work in Progress
-# Design Goals
+## Introduction
+This framework has been influenced by the great work of Ferdinand de Antoni
+Ferdinand de Antoni https://github.com/fdeantoni/tiny-tokio-actor
+
+When working with `tiny-tokio-actor` framework I ran into design issues, suhc as:
+* Usage of ActorRefs not abstracting from actual actor implementation. 
+* No priorized messages queues
+* No timers
+
+This actor framework shall investigate solutions to avoid these issues, for example:
+* `Gate<M>` replacing `ActorRef<A,E>`
+* Support for multiple gates
+* A `Gate<M>` is a property granting access to certain message handlers of an actor.
+* Priorized/typed timers
+
+*Status of this project: Work in Progress*
+
+### Design Goals
 
 * [x] Message oriented actor framework
 * [x] Gates granting access to certain Message-API (property)
@@ -12,8 +28,10 @@ Status: This is Work in Progress
 * [x] SystemEvent bus
 * [x] Pre-Start and Post-Stop handlers
 * [x] JonHandles to synchronize with terminated actors
-* [ ] Support for timers and cyclic actions
+* [x] Support for timers and cyclic actions
+* [x] Prioritize timers against messages sent via gates
 * [ ] DualGate Actors
+* [ ] TrippleGate Actors
 * [ ] UDP message entity
 * [ ] TCP stream tokenizer entity
 
@@ -25,11 +43,47 @@ oriented; defining channels of messages between entities;
 the iplementation type of the actor is not reflected in external 
 handles.
 
-More or less, this is a framework around the `select!` statement
+This is an actor framework around the `select!` statement
 and bounded channels `tokio::sync::channel`
 
+When spawning actors, a typed gate `Gate<M>` can be used to send message. 
+A message handler for this message type `M` must be implemented for the actor.
+
+## Timer
+Actors support timers. A timer is formed specifying a  `Duration` and 
+an event  `E` to be emitted.
+
+```rust
+#[derive(Derivative)]
+#[derivative(Debug, PartialEq)]
+struct DemoActor;
+
+#[async_trait]
+impl Actor<DemoSysEvent> for DemoActor {}
+
+#[derive(Clone, Debug)]
+enum TimerEvent { REPEAT_ACTION }
+
+impl Message for TimerEvent {
+    type Response = ();
+}
+
+#[async_trait]
+impl Handler<DemoSysEvent, TimerEvent> for DemoActor {
+    async fn handle(&mut self, event: TimerEvent, ctx: &mut ActorContext<DemoSysEvent, Self>) -> () {
+        /* do something and finally trigger timer to repeat the task */
+
+        let _ = ctx.timer().oneshot_timer(
+            Duration::from_millis(200 /* delay */ ),
+            TimerEvent::REPEAT_ACTION);
+        ()
+    }
+}
+```
+
+## Typed Gates
 Currently an actor is receiving data from a single `Gate<M>` only,
-but design will permit multiple gates in future. This way gates
+but design will permit multiple gates in the future. This way gates
 may be used as property to access privileged API of the actor.
 
 Actors are managed in groups. When the group is terminated or

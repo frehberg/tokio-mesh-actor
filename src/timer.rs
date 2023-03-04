@@ -94,7 +94,6 @@ mod tests {
         async fn handle(&mut self, _msg: TestTimerMessage, _ctx: &mut ActorContext<TestSystemEvent, Self>) -> () {
             if self.count_down - 1 == 0 {
                 self.count_down -= 1;
-
                 self.continue_test.cancel();
             } else {
                 self.count_down -= 1;
@@ -110,16 +109,16 @@ mod tests {
     impl Message for TestAddTimer {
         type Response = ();
     }
-    
+
     #[async_trait]
     impl Handler<TestSystemEvent, TestAddTimer> for TestActor1 {
         async fn handle(&mut self, msg: TestAddTimer, ctx: &mut ActorContext<TestSystemEvent, Self>) -> () {
             let _ = ctx.timer().oneshot_timer(
-                Duration::from_millis(msg.0 as u64), TestTimerMessage("Timer Works".to_string()));
+                Duration::from_millis(msg.0 as u64),
+                TestTimerMessage("Timer Works".to_string()));
             ()
         }
     }
-
 
     #[tokio::test]
     async fn test_timer_trigger() {
@@ -140,12 +139,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(delay as u64)).await;
         }
 
-        // reaching zero, the actor shall terminate the test
+        // reaching zero, the actor shall terminate the test, or fail after timeout
         let total_time_max = 2 * count_down * delay;
         let all_timers_counted = timeout(Duration::from_millis(total_time_max as u64),
                                          continue_test.cancelled()).await;
         assert!(all_timers_counted.is_ok());
-
 
         // gates of same type may be managed in containers
         group.terminate();
@@ -154,6 +152,75 @@ mod tests {
         let terminated = join_handle1.await;
         assert!(terminated.is_ok());
         assert_eq!(terminated.unwrap().count_down, 0);
+    }
+
+
+    #[tokio::test]
+    async fn test_unbound_channel() {}
+}
+
+
+#[cfg(test)]
+mod demo {
+    use async_trait::async_trait;
+    use tokio::time::timeout;
+
+    use crate::ActorContext;
+    use crate::actor::{Actor, Handler};
+    use crate::bus::EventBus;
+    use crate::system::ActorSystem;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum DemoSysEvent {
+        None
+    }
+
+    impl SystemEvent for DemoSysEvent {}
+
+    #[derive(Derivative)]
+    #[derivative(Debug, PartialEq)]
+    struct DemoActor;
+
+    #[async_trait]
+    impl Actor<DemoSysEvent> for DemoActor {}
+
+    #[derive(Clone, Debug)]
+    enum TimerEvent { REPEAT_ACTION }
+
+    impl Message for TimerEvent {
+        type Response = ();
+    }
+
+    #[async_trait]
+    impl Handler<DemoSysEvent, TimerEvent> for DemoActor {
+        async fn handle(&mut self, event: TimerEvent, ctx: &mut ActorContext<DemoSysEvent, Self>) -> () {
+            /* do something and finally trigger timer to repeat the task */
+
+            let _ = ctx.timer().oneshot_timer(
+                Duration::from_millis(200 /* delay */ ),
+                TimerEvent::REPEAT_ACTION);
+            ()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timer_trigger() {
+        let bus = EventBus::new(200);
+        let system: ActorSystem<DemoSysEvent> = ActorSystem::new(bus);
+        let continue_test = CancellationToken::new();
+
+        let count_down = 2;
+        let delay = 200;
+        let actor = DemoActor;
+        let group = system.create_group();
+        let (join_handle1, gate1) =
+            group.single_gated_actor(actor, 200);
+
+        // gates of same type may be managed in containers
+        group.terminate();
+
     }
 
 
